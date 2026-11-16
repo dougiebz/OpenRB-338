@@ -20,9 +20,13 @@ use orb_ui::menu::MENU_H;
 #[cfg(target_os = "macos")]
 use raw_window_handle::HasRawWindowHandle;
 
-/// Logical size of the app window: the panel plus the menu bar.
+/// Logical size of the app window at the panel's native size: the panel plus the menu bar.
 pub const W: f64 = PANEL_W as f64;
 pub const H: f64 = (PANEL_H + MENU_H) as f64;
+/// The window opens at this many times the native size. The panel is the original's
+/// 624 x 510, which is small on a current display, and not every host lets the user resize
+/// a plugin window.
+pub const OPEN_SCALE: f64 = 1.5;
 
 /// The view size the host last asked for, in logical pixels.
 pub struct FrameSize {
