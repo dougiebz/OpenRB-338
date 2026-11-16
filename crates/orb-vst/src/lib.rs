@@ -152,9 +152,10 @@ impl Plugin for OpenRb {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        let open_w = (ui_host::W * ui_host::OPEN_SCALE).round();
         let frame = Arc::new(ui_host::FrameSize::new(
-            (ui_host::W * ui_host::OPEN_SCALE).round() as u32,
-            (ui_host::H * ui_host::OPEN_SCALE).round() as u32,
+            open_w as u32,
+            ui_host::height_for(open_w).round() as u32,
         ));
         Some(Box::new(PanelEditor {
             app: self.app.clone(),
@@ -263,6 +264,10 @@ impl Editor for PanelEditor {
         let w = (orb_ui::layout::PANEL_W / 2.0).round() as u32;
         let h = (orb_ui::layout::PANEL_H / 2.0 + orb_ui::menu::MENU_H).round() as u32;
         (w, h)
+    }
+
+    fn constrain_size(&self, width: u32, height: u32) -> (u32, u32) {
+        ui_host::keep_aspect(width, height, self.frame.get())
     }
 
     fn set_scale_factor(&self, _factor: f32) -> bool {

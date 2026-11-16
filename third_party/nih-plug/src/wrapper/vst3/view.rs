@@ -453,6 +453,13 @@ impl<P: Vst3Plugin> IPlugView for WrapperView<P> {
         if height < min_h {
             height = min_h;
         }
+        // the editor's own constraint (an aspect ratio), in its logical pixels
+        let (logical_w, logical_h) = self.editor.lock().constrain_size(
+            (width as f32 / scale).round().max(1.0) as u32,
+            (height as f32 / scale).round().max(1.0) as u32,
+        );
+        width = (logical_w as f32 * scale).round().max(1.0) as i32;
+        height = (logical_h as f32 * scale).round().max(1.0) as i32;
         (*rect).right = (*rect).left + width;
         (*rect).bottom = (*rect).top + height;
         kResultOk

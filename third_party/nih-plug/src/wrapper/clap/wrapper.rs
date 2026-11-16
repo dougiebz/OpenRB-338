@@ -2745,12 +2745,24 @@ impl<P: ClapPlugin> Wrapper<P> {
         check_null_ptr!(false, plugin, (*plugin).plugin_data, width, height);
         let wrapper = &*((*plugin).plugin_data as *const Self);
 
-        let (min_width, min_height) = wrapper.editor.borrow().as_ref().unwrap().lock().min_size();
+        let editor = wrapper.editor.borrow();
+        let editor = editor.as_ref().unwrap().lock();
+        let (min_width, min_height) = editor.min_size();
         let scaling_factor = wrapper.editor_scaling_factor.load(Ordering::Relaxed);
-        let min_width = (min_width as f32 * scaling_factor).round().max(1.0) as u32;
-        let min_height = (min_height as f32 * scaling_factor).round().max(1.0) as u32;
-        *width = (*width).max(min_width);
-        *height = (*height).max(min_height);
+        let scale = if scaling_factor > 0.0 {
+            scaling_factor
+        } else {
+            1.0
+        };
+        let min_width = (min_width as f32 * scale).round().max(1.0) as u32;
+        let min_height = (min_height as f32 * scale).round().max(1.0) as u32;
+        // the editor's own constraint (an aspect ratio), in its logical pixels
+        let (logical_width, logical_height) = editor.constrain_size(
+            ((*width).max(min_width) as f32 / scale).round().max(1.0) as u32,
+            ((*height).max(min_height) as f32 / scale).round().max(1.0) as u32,
+        );
+        *width = (logical_width as f32 * scale).round().max(1.0) as u32;
+        *height = (logical_height as f32 * scale).round().max(1.0) as u32;
 
         true
     }

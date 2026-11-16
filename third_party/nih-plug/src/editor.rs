@@ -78,6 +78,14 @@ pub trait Editor: Send {
         (1, 1)
     }
 
+    /// The size the editor takes when the host proposes `width` x `height` (logical pixels,
+    /// not below [`Editor::min_size`]): an editor that keeps an aspect ratio returns the
+    /// nearest size it accepts. The wrappers answer the host's size query with it (VST3
+    /// `checkSizeConstraint`, CLAP `adjust_size`). The default takes any size.
+    fn constrain_size(&self, width: u32, height: u32) -> (u32, u32) {
+        (width, height)
+    }
+
     // TODO: Reconsider adding a tick function here for the Linux `IRunLoop`. To keep this platform
     //       and API agnostic, add a way to ask the GuiContext if the wrapper already provides a
     //       tick function. If it does not, then the Editor implementation must handle this by
