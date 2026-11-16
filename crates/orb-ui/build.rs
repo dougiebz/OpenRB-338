@@ -1,5 +1,6 @@
 //! Embeds every SVG part of `assets/ui` (except the composed demo `panel.svg`) in the
-//! binary: writes `$OUT_DIR/parts_gen.rs` with `PARTS: &[(name, uri, bytes)]`, sorted by name.
+//! binary: writes `$OUT_DIR/parts_gen.rs` with `PARTS: &[(name, uri, bytes)]`, sorted by name,
+//! and `SKIN: &[(name, bytes)]`, the photographs of `assets/skin`.
 
 use std::env;
 use std::fmt::Write as _;
@@ -198,6 +199,31 @@ fn main() {
             b,
             vb[2] - 2.0 * b,
             vb[3] - 2.0 * b
+        )
+        .unwrap();
+    }
+    out.push_str("];\n");
+    // The built-in skin: every `assets/skin/<part name>.png`, sorted by name (`SKIN`).
+    let skin = manifest.join("../../assets/skin").canonicalize().unwrap();
+    println!("cargo:rerun-if-changed={}", skin.display());
+    let mut photos: Vec<String> = fs::read_dir(&skin)
+        .unwrap()
+        .filter_map(|e| {
+            let name = e.unwrap().file_name().into_string().unwrap();
+            Some(name.strip_suffix(".png")?.to_string())
+        })
+        .collect();
+    photos.sort();
+    out.push_str(concat!(
+        "/// The built-in skin's photographs: part name, PNG bytes.\n",
+        "pub static SKIN: &[(&str, &[u8])] = &[\n"
+    ));
+    for n in &photos {
+        let path = skin.join(format!("{n}.png"));
+        writeln!(
+            out,
+            "    ({n:?}, include_bytes!({:?})),",
+            path.display().to_string()
         )
         .unwrap();
     }

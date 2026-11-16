@@ -38,47 +38,76 @@ pub fn part(name: &str) -> Option<Part> {
     Some(Part::from_row(&PARTS[i]))
 }
 
-/// A photographic image that stands in for the part `name`: `<name>.png` in the folder
-/// `ORB_UI_SKIN_DIR` names, decoded once and kept for the process. `None` without the
-/// variable, without the file, or when the file does not decode (said once on stderr). The
-/// part keeps its rectangle, so a skin moves nothing; a part the folder lacks is drawn from
-/// its SVG as ever.
+/// A photographic image that stands in for the part `name`, decoded once and kept for the
+/// process. Without a skin folder it is the built-in skin's (`assets/skin`, embedded by
+/// `build.rs`). A skin folder (the one `ORB_UI_SKIN_DIR` names, else [`default_skin_dir`])
+/// replaces the built-in skin as a whole: its `<name>.png` is used, and a part it lacks is
+/// drawn from its SVG, so an empty folder gives the drawn panel. `None` also when the image
+/// does not decode (said once on stderr). The part keeps its rectangle, so a skin moves
+/// nothing.
 pub fn skin_image(name: &str) -> Option<std::sync::Arc<egui::ColorImage>> {
     type Cache = std::collections::HashMap<String, Option<std::sync::Arc<egui::ColorImage>>>;
     static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
     static IMAGES: std::sync::Mutex<Option<Cache>> = std::sync::Mutex::new(None);
-    let dir = DIR
-        .get_or_init(|| {
-            std::env::var_os("ORB_UI_SKIN_DIR")
-                .filter(|v| !v.is_empty())
-                .map(std::path::PathBuf::from)
-                .or_else(default_skin_dir)
-        })
-        .as_ref()?;
+    let dir = DIR.get_or_init(|| {
+        std::env::var_os("ORB_UI_SKIN_DIR")
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(default_skin_dir)
+    });
     let mut images = IMAGES.lock().ok()?;
     let images = images.get_or_insert_with(Cache::new);
     if let Some(known) = images.get(name) {
         return known.clone();
     }
-    let path = dir.join(format!("{name}.png"));
-    let loaded =
-        std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| match image::load_from_memory(&bytes) {
-                Ok(decoded) => {
-                    let rgba = decoded.to_rgba8();
-                    let size = [rgba.width() as usize, rgba.height() as usize];
-                    Some(std::sync::Arc::new(
-                        egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
-                    ))
-                }
-                Err(e) => {
-                    eprintln!("orb: skin: {}: {e}", path.display());
-                    None
-                }
-            });
+    let loaded = match dir {
+        Some(dir) => {
+            let path = dir.join(format!("{name}.png"));
+            std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| decode_photo(&bytes, &path.display().to_string()))
+        }
+        None => built_in_photo(name).and_then(|bytes| decode_photo(bytes, name)),
+    };
     images.insert(name.to_string(), loaded.clone());
     loaded
+}
+
+/// The built-in skin's PNG of the part `name` (`SKIN` is sorted by name).
+fn built_in_photo(name: &str) -> Option<&'static [u8]> {
+    let i = SKIN.binary_search_by(|p| p.0.cmp(name)).ok()?;
+    Some(SKIN[i].1)
+}
+
+/// The longest side a skin photograph is kept at: the smallest texture limit egui assumes
+/// (its default `max_texture_side`), over three times the panel's width.
+const PHOTO_MAX_SIDE: u32 = 2048;
+
+/// The decoded PNG `bytes`, scaled down to [`PHOTO_MAX_SIDE`] if larger; a failure is said on
+/// stderr with `what` and gives `None`.
+fn decode_photo(bytes: &[u8], what: &str) -> Option<std::sync::Arc<egui::ColorImage>> {
+    match image::load_from_memory(bytes) {
+        Ok(decoded) => {
+            let decoded = if decoded.width().max(decoded.height()) > PHOTO_MAX_SIDE {
+                decoded.resize(
+                    PHOTO_MAX_SIDE,
+                    PHOTO_MAX_SIDE,
+                    image::imageops::FilterType::Lanczos3,
+                )
+            } else {
+                decoded
+            };
+            let rgba = decoded.to_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            Some(std::sync::Arc::new(
+                egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
+            ))
+        }
+        Err(e) => {
+            eprintln!("orb: skin: {what}: {e}");
+            None
+        }
+    }
 }
 
 /// The skin folder used when `ORB_UI_SKIN_DIR` is not set, if it exists: `skin` in the
@@ -240,5 +269,19 @@ mod tests {
                 g.name
             );
         }
+    }
+
+    #[test]
+    fn the_built_in_skin_names_parts_and_decodes() {
+        assert!(!SKIN.is_empty());
+        assert!(SKIN.windows(2).all(|w| w[0].0 < w[1].0));
+        for &(name, bytes) in SKIN {
+            assert!(part(name).is_some(), "{name} is not a part");
+            let photo = decode_photo(bytes, name).unwrap_or_else(|| panic!("{name}"));
+            let side = photo.size[0].max(photo.size[1]);
+            assert!(side > 0 && side <= PHOTO_MAX_SIDE as usize, "{name}");
+        }
+        assert!(built_in_photo("bg_tb303").is_some());
+        assert!(built_in_photo("nope").is_none());
     }
 }
