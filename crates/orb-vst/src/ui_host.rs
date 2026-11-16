@@ -22,11 +22,36 @@ use raw_window_handle::HasRawWindowHandle;
 
 /// Logical size of the app window at the panel's native size: the panel plus the menu bar.
 pub const W: f64 = PANEL_W as f64;
+#[cfg(test)]
 pub const H: f64 = (PANEL_H + MENU_H) as f64;
 /// The window opens at this many times the native size. The panel is the original's
 /// 624 x 510, which is small on a current display, and not every host lets the user resize
 /// a plugin window.
 pub const OPEN_SCALE: f64 = 1.5;
+/// The narrowest window: the panel at half its native size.
+pub const MIN_W: f64 = W / 2.0;
+
+/// The window's height at `width`: the menu bar, which keeps its height, over the panel at
+/// its own aspect ratio.
+pub fn height_for(width: f64) -> f64 {
+    MENU_H as f64 + width * PANEL_H as f64 / PANEL_W as f64
+}
+
+/// The window size that shows the whole panel with no empty band, nearest to the
+/// `width` x `height` a host proposes while the window is `current`. The side the host
+/// moved more decides, so dragging an edge works as well as dragging a corner.
+pub fn keep_aspect(width: u32, height: u32, current: (u32, u32)) -> (u32, u32) {
+    let ratio = PANEL_H as f64 / PANEL_W as f64;
+    let moved_w = (f64::from(width) - f64::from(current.0)).abs() * ratio;
+    let moved_h = (f64::from(height) - f64::from(current.1)).abs();
+    let w = if moved_w >= moved_h {
+        f64::from(width)
+    } else {
+        (f64::from(height) - MENU_H as f64) / ratio
+    };
+    let w = w.max(MIN_W).round();
+    (w as u32, height_for(w).round() as u32)
+}
 
 /// The view size the host last asked for, in logical pixels.
 pub struct FrameSize {
@@ -659,4 +684,30 @@ fn egui_key(key: &Key) -> Option<egui::Key> {
         },
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod aspect_tests {
+    use super::*;
+
+    #[test]
+    fn the_window_keeps_the_panel_ratio_under_the_menu() {
+        let native = (W as u32, H as u32);
+        // nothing moved: the native size stays
+        assert_eq!(keep_aspect(native.0, native.1, native), native);
+        // the right edge alone: the height follows
+        assert_eq!(keep_aspect(1248, native.1, native), (1248, 22 + 1020));
+        // the bottom edge alone: the width follows
+        assert_eq!(keep_aspect(native.0, 22 + 1020, native), (1248, 22 + 1020));
+        // a corner dragged out of ratio: the side that moved more decides
+        assert_eq!(keep_aspect(700, 2000, native).1, 2000);
+        assert_eq!(keep_aspect(2000, 700, native).0, 2000);
+        // never below half the panel
+        assert_eq!(keep_aspect(10, 10, native), (312, 22 + 255));
+        // every answer has the panel's ratio under the menu
+        for (w, h) in [(800, 600), (1500, 900), (400, 1200), (936, 787)] {
+            let (cw, ch) = keep_aspect(w, h, native);
+            assert_eq!(ch, height_for(f64::from(cw)).round() as u32, "{w} x {h}");
+        }
+    }
 }
