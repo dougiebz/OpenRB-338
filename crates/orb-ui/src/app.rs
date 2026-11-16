@@ -743,6 +743,40 @@ fn first_frame_id() -> egui::Id {
     egui::Id::unique("orb-ui first frame")
 }
 
+/// The textures of a skin's photographs ([`art::skin_image`]), one per part name whatever the
+/// size it is drawn at, kept in the context's memory for the process.
+#[derive(Clone, Default)]
+struct SkinTextures(std::collections::HashMap<String, egui::TextureHandle>);
+
+/// The texture of the skin's photograph of the part `name`, if the skin has one.
+fn skin_texture(ctx: &egui::Context, name: &str) -> Option<egui::load::SizedTexture> {
+    let id = egui::Id::unique("orb-ui skin textures");
+    let known = ctx.data_mut(|d| {
+        d.get_temp_mut_or_default::<SkinTextures>(id)
+            .0
+            .get(name)
+            .cloned()
+    });
+    let handle = match known {
+        Some(handle) => handle,
+        None => {
+            let photo = art::skin_image(name)?;
+            let handle = ctx.load_texture(
+                format!("skin/{name}"),
+                egui::ImageData::Color(photo),
+                egui::TextureOptions::LINEAR,
+            );
+            ctx.data_mut(|d| {
+                d.get_temp_mut_or_default::<SkinTextures>(id)
+                    .0
+                    .insert(name.to_string(), handle.clone())
+            });
+            handle
+        }
+    };
+    Some(egui::load::SizedTexture::from_handle(&handle))
+}
+
 fn paint_part_with(ui: &Ui, name: &str, rect: Rect, rot: Option<(f32, Vec2)>, tint: Color32) {
     // A part name no art has (a state the panel does not foresee) draws nothing: it must not
     // close the app (task-156). It is reported once per name.
@@ -750,6 +784,18 @@ fn paint_part_with(ui: &Ui, name: &str, rect: Rect, rot: Option<(f32, Vec2)>, ti
         missing_part(name);
         return;
     };
+    // A skin's photograph stands in for the SVG: it fills the control's rectangle exactly (no
+    // bleed), so nothing moves.
+    if let Some(texture) = skin_texture(ui.ctx(), name) {
+        let mut image = Image::from_texture(texture)
+            .fit_to_exact_size(rect.size())
+            .tint(tint);
+        if let Some((angle, origin)) = rot {
+            image = image.rotate(angle, origin);
+        }
+        image.paint_at(ui, rect);
+        return;
+    }
     // `rect` is the control's rectangle; the art reaches `bleed` panel pixels beyond it.
     let k = rect.width() / part.w.max(f32::EPSILON);
     let art = rect.expand(part.bleed * k);

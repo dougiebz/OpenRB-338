@@ -1,5 +1,7 @@
 //! The panel's SVG parts (`assets/ui`), embedded by `build.rs`, and the knob designs.
 
+use eframe::egui;
+
 include!(concat!(env!("OUT_DIR"), "/parts_gen.rs"));
 
 /// A part: its URI for egui's loaders, its SVG bytes and its bleed: how far, in panel pixels,
@@ -34,6 +36,48 @@ impl Part {
 pub fn part(name: &str) -> Option<Part> {
     let i = PARTS.binary_search_by(|p| p.0.cmp(name)).ok()?;
     Some(Part::from_row(&PARTS[i]))
+}
+
+/// A photographic image that stands in for the part `name`: `<name>.png` in the folder
+/// `ORB_UI_SKIN_DIR` names, decoded once and kept for the process. `None` without the
+/// variable, without the file, or when the file does not decode (said once on stderr). The
+/// part keeps its rectangle, so a skin moves nothing; a part the folder lacks is drawn from
+/// its SVG as ever.
+pub fn skin_image(name: &str) -> Option<std::sync::Arc<egui::ColorImage>> {
+    type Cache = std::collections::HashMap<String, Option<std::sync::Arc<egui::ColorImage>>>;
+    static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    static IMAGES: std::sync::Mutex<Option<Cache>> = std::sync::Mutex::new(None);
+    let dir = DIR
+        .get_or_init(|| {
+            std::env::var_os("ORB_UI_SKIN_DIR")
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from)
+        })
+        .as_ref()?;
+    let mut images = IMAGES.lock().ok()?;
+    let images = images.get_or_insert_with(Cache::new);
+    if let Some(known) = images.get(name) {
+        return known.clone();
+    }
+    let path = dir.join(format!("{name}.png"));
+    let loaded =
+        std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| match image::load_from_memory(&bytes) {
+                Ok(decoded) => {
+                    let rgba = decoded.to_rgba8();
+                    let size = [rgba.width() as usize, rgba.height() as usize];
+                    Some(std::sync::Arc::new(
+                        egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
+                    ))
+                }
+                Err(e) => {
+                    eprintln!("orb: skin: {}: {e}", path.display());
+                    None
+                }
+            });
+    images.insert(name.to_string(), loaded.clone());
+    loaded
 }
 
 /// The part names asked for that no art has, in this process.
