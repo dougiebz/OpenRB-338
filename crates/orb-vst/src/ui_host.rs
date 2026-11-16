@@ -30,6 +30,48 @@ pub const H: f64 = (PANEL_H + MENU_H) as f64;
 pub const OPEN_SCALE: f64 = 1.5;
 /// The narrowest window: the panel at half its native size.
 pub const MIN_W: f64 = W / 2.0;
+/// The side of the resize grip in the window's bottom right corner, in points.
+const GRIP: f32 = 18.0;
+
+/// The resize grip: three diagonal lines in the bottom right corner of `ui`. Dragging it
+/// returns the window size to ask the host for. Some hosts and formats (an Audio Unit) give
+/// a plugin window no resizable frame, so the plugin has to offer the handle itself.
+fn resize_grip(ui: &mut egui::Ui, current: (u32, u32)) -> Option<(u32, u32)> {
+    let corner = ui.max_rect().max;
+    let rect = egui::Rect::from_min_max(corner - vec2(GRIP, GRIP), corner);
+    let grip = ui.interact(
+        rect,
+        ui.id().with("openrb-resize-grip"),
+        egui::Sense::drag(),
+    );
+    let alpha = if grip.hovered() || grip.dragged() {
+        230
+    } else {
+        110
+    };
+    let stroke = egui::Stroke::new(1.5, egui::Color32::from_white_alpha(alpha));
+    for k in 1..=3 {
+        let d = GRIP * k as f32 / 4.0;
+        ui.painter().line_segment(
+            [
+                pos2(corner.x - d, corner.y - 2.0),
+                pos2(corner.x - 2.0, corner.y - d),
+            ],
+            stroke,
+        );
+    }
+    if !grip.dragged() {
+        return None;
+    }
+    // the window's top left corner stays put, so the pointer is the new bottom right corner
+    let p = grip.interact_pointer_pos()?;
+    let wanted = keep_aspect(
+        p.x.round().max(1.0) as u32,
+        p.y.round().max(1.0) as u32,
+        current,
+    );
+    (wanted != current).then_some(wanted)
+}
 
 /// The window's height at `width`: the menu bar, which keeps its height, over the panel at
 /// its own aspect ratio.
@@ -386,6 +428,7 @@ impl Host {
             self.images = true;
         }
         let app = Arc::clone(&self.app);
+        let mut wanted = None;
         let mut full = self.ctx.run_ui(self.raw.take(), |ui| {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
@@ -402,8 +445,14 @@ impl Host {
                         // The project save may run while this frame holds the panel.
                         self.params.song.capture(&panel);
                     }
+                    wanted = resize_grip(ui, asked);
                 });
         });
+        if let Some((width, height)) = wanted {
+            // the next frame resizes the view; the host is asked to follow
+            self.frame.set(width, height);
+            self.context.request_resize();
+        }
         self.paint(window, &mut full);
     }
 
