@@ -443,7 +443,7 @@ impl Host {
                             self.params.follow(&setter, &snap, &mut self.begun);
                         }
                         // The project save may run while this frame holds the panel.
-                        self.params.song.capture(&panel);
+                        self.params.song.capture(&mut panel);
                     }
                     wanted = resize_grip(ui, asked);
                 });

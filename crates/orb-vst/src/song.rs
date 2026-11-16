@@ -34,7 +34,7 @@ impl SongBlob {
     }
 
     /// Stores the song File > Save would write.
-    pub fn capture(&self, app: &App) {
+    pub fn capture(&self, app: &mut App) {
         if let Ok(bytes) = app.song_bytes() {
             *self.bytes.lock().expect("song bytes") = bytes;
         }
@@ -47,8 +47,8 @@ impl SongBlob {
         let Some(app) = app else {
             return;
         };
-        if let Ok(app) = app.try_lock() {
-            self.capture(&app);
+        if let Ok(mut app) = app.try_lock() {
+            self.capture(&mut app);
         }
     }
 }

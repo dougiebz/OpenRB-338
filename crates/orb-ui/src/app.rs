@@ -347,10 +347,81 @@ impl App {
     }
 }
 
+/// The window's size as [`App::keep_window_ratio`] last saw it.
+#[derive(Clone, Copy, Default)]
+struct WindowRatio {
+    size: Vec2,
+    /// The pass in which `size` was first seen.
+    since: u64,
+    /// The size the window was last set to.
+    snapped: Vec2,
+}
+
+/// A window size that has not changed for this many frames is taken as the end of a resize.
+const RATIO_SETTLE_FRAMES: u64 = 12;
+
+impl App {
+    /// Keeps the window at the panel's proportions (the menu bar over the panel), so that a
+    /// resize leaves no empty band beside or below the panel: once the size has stood still
+    /// for a moment, the window takes the nearest size of that shape; the side the user moved
+    /// decides. A maximized or full-screen window, and a screenshot run, are left alone.
+    fn keep_window_ratio(&self, ctx: &egui::Context) {
+        if self.shot.is_some() {
+            return;
+        }
+        let (inner, fixed) = ctx.input(|i| {
+            let v = i.viewport();
+            (
+                v.inner_rect,
+                v.maximized.unwrap_or(false) || v.fullscreen.unwrap_or(false),
+            )
+        });
+        let Some(inner) = inner else {
+            return;
+        };
+        if fixed {
+            return;
+        }
+        let size = inner.size();
+        let id = egui::Id::unique("orb-ui window ratio");
+        let pass = ctx.cumulative_pass_nr();
+        let mut seen: WindowRatio = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
+        if seen.size != size {
+            seen.size = size;
+            seen.since = pass;
+            ctx.data_mut(|d| d.insert_temp(id, seen));
+            ctx.request_repaint();
+            return;
+        }
+        if pass < seen.since + RATIO_SETTLE_FRAMES {
+            ctx.request_repaint();
+            return;
+        }
+        let menu = if self.menu { MENU_H } else { 0.0 };
+        let ratio = PANEL_H / PANEL_W;
+        let by_height =
+            (size.x - seen.snapped.x).abs() < 0.5 && (size.y - seen.snapped.y).abs() >= 0.5;
+        let width = if by_height {
+            ((size.y - menu) / ratio).max(PANEL_W / 2.0)
+        } else {
+            size.x.max(PANEL_W / 2.0)
+        };
+        let want = Vec2::new(width.round(), (menu + width * ratio).round());
+        if (want - size).abs().max_elem() > 1.0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(want));
+        }
+        if seen.snapped != want {
+            seen.snapped = want;
+            ctx.data_mut(|d| d.insert_temp(id, seen));
+        }
+    }
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         egui_extras::install_image_loaders(ui.ctx());
         self.close_check(&ui.ctx().clone());
+        self.keep_window_ratio(ui.ctx());
         self.show(ui);
         self.screenshot(ui.ctx());
         if let Some(s) = &mut self.frame_stats

@@ -52,6 +52,7 @@ pub fn skin_image(name: &str) -> Option<std::sync::Arc<egui::ColorImage>> {
             std::env::var_os("ORB_UI_SKIN_DIR")
                 .filter(|v| !v.is_empty())
                 .map(std::path::PathBuf::from)
+                .or_else(default_skin_dir)
         })
         .as_ref()?;
     let mut images = IMAGES.lock().ok()?;
@@ -78,6 +79,27 @@ pub fn skin_image(name: &str) -> Option<std::sync::Arc<egui::ColorImage>> {
             });
     images.insert(name.to_string(), loaded.clone());
     loaded
+}
+
+/// The skin folder used when `ORB_UI_SKIN_DIR` is not set, if it exists: `skin` in the
+/// settings folder (`~/Library/Application Support/OpenRB-338` on macOS, `%APPDATA%\\OpenRB-338`
+/// on Windows, `$XDG_CONFIG_HOME/OpenRB-338` or `~/.config/OpenRB-338` elsewhere). A plugin
+/// has no environment of its own in a host, so the folder is how it finds a skin.
+fn default_skin_dir() -> Option<std::path::PathBuf> {
+    let var = |name: &str| {
+        std::env::var_os(name)
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+    };
+    let base = if cfg!(target_os = "macos") {
+        var("HOME")?.join("Library/Application Support")
+    } else if cfg!(windows) {
+        var("APPDATA")?
+    } else {
+        var("XDG_CONFIG_HOME").or_else(|| Some(var("HOME")?.join(".config")))?
+    };
+    let dir = base.join("OpenRB-338").join("skin");
+    dir.is_dir().then_some(dir)
 }
 
 /// The part names asked for that no art has, in this process.
