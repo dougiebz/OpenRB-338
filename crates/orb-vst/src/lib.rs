@@ -1,4 +1,4 @@
-//! OpenRB-338 as a VST3 instrument for a host such as Ableton Live.
+//! OpenRB-338 as a VST3 and CLAP instrument for a host such as Ableton Live or Bitwig Studio.
 //!
 //! The window is the desktop app's panel (`orb-ui`). The host's audio callback
 //! is the same player the panel drives, so the knobs, the pattern and Play are
@@ -389,4 +389,27 @@ mod vst3_export {
     use nih_plug::prelude::*;
 
     nih_export_vst3!(OpenRb);
+}
+
+impl ClapPlugin for OpenRb {
+    /// The app's bundle identifier (`scripts/macos-app.sh`) with the plugin under it.
+    const CLAP_ID: &'static str = "net.emphased.openrb338.plugin";
+    const CLAP_DESCRIPTION: Option<&'static str> =
+        Some("Two TB-303s, a TR-808 and a TR-909 with ReBirth RB-338's engine");
+    const CLAP_MANUAL_URL: Option<&'static str> = None;
+    const CLAP_SUPPORT_URL: Option<&'static str> = None;
+    const CLAP_FEATURES: &'static [ClapFeature] = &[
+        ClapFeature::Instrument,
+        ClapFeature::Synthesizer,
+        ClapFeature::DrumMachine,
+        ClapFeature::Stereo,
+    ];
+}
+
+#[allow(semicolon_in_expressions_from_non_local_macros)]
+mod clap_export {
+    use super::OpenRb;
+    use nih_plug::prelude::*;
+
+    nih_export_clap!(OpenRb);
 }
