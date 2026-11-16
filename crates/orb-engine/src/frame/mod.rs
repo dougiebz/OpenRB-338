@@ -18,6 +18,7 @@
 
 pub mod edit;
 pub mod export;
+pub mod stems;
 
 #[cfg(test)]
 mod tests;
@@ -798,6 +799,9 @@ pub struct Frame {
     /// object (`song+0x30C`, a heap address). Set by [`Engine::render`]; the delay leaves it on
     /// the stack ([`SendEffect::stack_word`]).
     pub out_end: Option<i32>,
+    /// Not in the original: the stems of the last block ([`stems`]), `None` when they are off.
+    /// The mix does not depend on it.
+    pub stems: Option<Box<stems::StemBlock>>,
 }
 
 /// `unk_100F012C`: the right channel's float output of a render call (0x10013A3A), at the
@@ -842,6 +846,7 @@ impl Frame {
             blocks: 0,
             stack_word: None,
             out_end: None,
+            stems: None,
         }
     }
 
@@ -938,6 +943,7 @@ impl Frame {
             stack_word: None,
         };
         let bus = &mut self.bus;
+        let mut stems = self.stems.as_deref_mut();
         for (c, ch) in self.state.channels.iter_mut().enumerate() {
             self.devices.channels[c].process(bus, &ctx);
             // the word the audio slot leaves at its esp0 - 0x1C (the 303s leave the slot as it
@@ -992,10 +998,35 @@ impl Frame {
                 gl += dl;
                 gr += dr;
             }
+            if let Some(s) = stems.as_deref_mut() {
+                // the products the loop above added, on their own
+                let (mut gl, mut gr) = (old_l, old_r);
+                for i in (0..BLOCK).step_by(2) {
+                    for j in i..i + 2 {
+                        let b = bus[j] as f64;
+                        s[c][0][j] = st(b * gl);
+                        s[c][1][j] = st(b * gr);
+                    }
+                    gl += dl;
+                    gr += dr;
+                }
+            }
+        }
+        if let Some(s) = stems.as_deref_mut() {
+            // the master before the send effect
+            s[stems::DELAY] = [*l, *r];
         }
         // 0x10013844: the send effect
         ctx.stack_word = None;
         self.devices.delay.process(&mut self.state.send, l, r, &ctx);
+        if let Some(s) = stems.as_deref_mut() {
+            // what the send effect added
+            for (side, after) in s[stems::DELAY].iter_mut().zip([&*l, &*r]) {
+                for (x, &a) in side.iter_mut().zip(after) {
+                    *x = st(a as f64 - *x as f64);
+                }
+            }
+        }
         self.stack_word = self.devices.delay.stack_word(self.out_end, self.stack_word);
         // 0x10013883: the compressor on the master
         if self.state.master_comp {
@@ -1006,6 +1037,11 @@ impl Frame {
         self.state.master = st(m);
         for x in l.iter_mut().chain(r.iter_mut()) {
             *x = st(*x as f64 * m);
+        }
+        if let Some(s) = stems {
+            for x in s.iter_mut().flatten().flatten() {
+                *x = st(*x as f64 * m);
+            }
         }
         // 0x10013960: the master peak meters
         for (k, buf) in [&*l, &*r].into_iter().enumerate() {
@@ -1058,6 +1094,8 @@ pub struct Engine {
     fault: Option<FaultRecord>,
     /// Not in the original: the batch [`Engine::load`] stopped at.
     refused: Option<LoadRefused>,
+    /// Not in the original: the stems of the last render call, when they are on.
+    stems: Option<stems::Stems>,
 }
 
 fn zero_buf() -> Box<[f32; MAX_FRAMES]> {
@@ -1103,7 +1141,23 @@ impl Engine {
             out: [zero_buf(), zero_buf()],
             fault: None,
             refused: None,
+            stems: None,
         }
+    }
+
+    /// Not in the original: turns the stems ([`stems`]) on or off. Turning them on allocates,
+    /// so do it outside a real-time callback; the mix is the same either way.
+    pub fn set_stems(&mut self, on: bool) {
+        if on == self.stems.is_some() {
+            return;
+        }
+        self.stems = on.then(stems::Stems::new);
+        self.frame.stems = on.then(stems::zero_block);
+    }
+
+    /// The stems of the last [`Engine::render`] call, `None` when they are off.
+    pub fn stems(&self) -> Option<&stems::Stems> {
+        self.stems.as_ref()
     }
 
     /// The faults of the render calls so far: the first, and how many calls faulted. A faulting
@@ -1255,6 +1309,10 @@ impl Engine {
         // 0x10013A5E: the song's try-lock, before the leftover and the first block
         self.frame.stack_word = Some(LOCK_WORD);
         let [ol, or] = &mut self.out;
+        let mut stems = self.stems.as_mut();
+        if let Some(s) = stems.as_deref_mut() {
+            s.begin();
+        }
         let lp = self.output.leftover_pos;
         let mut pos = 0usize;
         let mut rem = n as i32;
@@ -1267,6 +1325,9 @@ impl Engine {
             {
                 o[..BLOCK - lp].copy_from_slice(&lo[lp..]);
                 lo[lp..].fill(GUARD);
+            }
+            if let Some(s) = stems.as_deref_mut() {
+                s.head(lp);
             }
             pos = BLOCK - lp;
             rem -= pos as i32;
@@ -1296,6 +1357,13 @@ impl Engine {
                 r.calls += 1;
                 return;
             }
+            if let (Some(s), Some(b)) = (stems.as_deref_mut(), self.frame.stems.as_deref()) {
+                if whole {
+                    s.whole(pos, b);
+                } else {
+                    s.partial(b);
+                }
+            }
             if !whole {
                 break;
             }
@@ -1312,6 +1380,12 @@ impl Engine {
                 o[pos..pos + k].copy_from_slice(&lo[..k]);
                 lo[..k].fill(GUARD);
             }
+            if let Some(s) = stems.as_deref_mut() {
+                s.tail(pos, k);
+            }
+        }
+        if let Some(s) = stems {
+            s.end(n);
         }
         for i in 0..n {
             buf[2 * i] = to_i16(ol[i]);
@@ -1437,6 +1511,9 @@ impl Engine {
         s.master_peak = [0.0; 2];
         s.send = [GUARD; BLOCK];
         self.output.leftover = [[0.0; BLOCK]; 2];
+        if let Some(s) = &mut self.stems {
+            s.reset();
+        }
         self.frame.devices.reset_all();
     }
 }

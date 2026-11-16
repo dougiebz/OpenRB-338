@@ -1300,3 +1300,123 @@ fn the_saved_blocks_are_the_live_ones_in_pattern_mode_and_the_copies_in_song_mod
     // a placeholder has no block
     assert!(d.channels[2].saved_block(true).is_empty());
 }
+
+/// A send effect that adds a constant to the master, then refills the send bus like the delay.
+struct Echo(f32);
+impl SongDevice for Echo {}
+impl SendEffect for Echo {
+    fn process(&mut self, send: &mut Block, l: &mut Block, r: &mut Block, _ctx: &BlockContext) {
+        for x in l.iter_mut().chain(r.iter_mut()) {
+            *x += self.0;
+        }
+        send.fill(GUARD);
+    }
+}
+
+/// [`loud_engine`]'s sources with channel 0 panned and a send effect that adds to the master.
+fn stem_engine(stems: bool) -> Engine {
+    let mut d = Devices::placeholders();
+    d.channels[0] = Box::new(Ramp(0));
+    d.channels[3] = Box::new(Const(-0.3));
+    d.delay = Box::new(Echo(0.01));
+    d.mixer.live.channels[0].pan = 20;
+    d.mixer.live.channels[3].level = 80;
+    let mut e = Engine::new(tables(), d);
+    e.set_stems(stems);
+    e
+}
+
+/// The stems of the last call: `[2 * source + side]`.
+fn stem_floats(e: &Engine) -> Vec<Vec<f32>> {
+    let s = e.stems().unwrap();
+    stems::Source::ALL
+        .iter()
+        .flat_map(|&src| [s.get(src, 0).to_vec(), s.get(src, 1).to_vec()])
+        .collect()
+}
+
+#[test]
+fn stems_leave_the_mix_unchanged() {
+    let mut plain = stem_engine(false);
+    let mut tapped = stem_engine(true);
+    assert!(plain.stems().is_none());
+    let mut a = vec![0i16; 2 * 2048];
+    let mut b = vec![0i16; 2 * 2048];
+    for n in [100, 28, 100, 0, 64, 10, 2048, 7, 1024] {
+        plain.render(&mut a, n);
+        tapped.render(&mut b, n);
+        assert_eq!(a, b, "a call of {n} frames");
+        assert_eq!(plain.state(), tapped.state());
+        assert_eq!(tapped.stems().unwrap().frames(), n);
+    }
+    assert!(a.iter().any(|&x| x != 0));
+    // off again: no stems, the same mix
+    tapped.set_stems(false);
+    assert!(tapped.stems().is_none() && tapped.frame.stems.is_none());
+    plain.render(&mut a, 500);
+    tapped.render(&mut b, 500);
+    assert_eq!(a, b);
+}
+
+#[test]
+fn stems_add_up_to_the_mix() {
+    let mut e = stem_engine(true);
+    let mut buf = vec![0i16; 2 * 1024];
+    for n in [1024, 100, 28, 1024] {
+        e.render(&mut buf, n);
+        let s = stem_floats(&e);
+        for side in 0..2 {
+            // the silent channels 1 and 2 add nothing
+            assert!(s[2 + side].iter().chain(&s[4 + side]).all(|&x| x == 0.0));
+            // channel 0, channel 3 and the send effect are in their stems
+            for src in [0, 3, 4] {
+                assert!(s[2 * src + side].iter().any(|&x| x != 0.0), "{src}");
+            }
+            for (i, &mix) in e.out[side][..n].iter().enumerate() {
+                let sum: f64 = (0..stems::SOURCES).map(|k| s[2 * k + side][i] as f64).sum();
+                // the difference is the guard (1e-6 times the master gain) and the rounding
+                let d = (mix as f64 - sum).abs();
+                assert!(d < 4e-6, "frame {i} side {side}: {d}");
+            }
+        }
+        // channel 0 is panned left, channel 3 is centered
+        assert!(s[0].iter().zip(&s[1]).all(|(l, r)| l.abs() >= r.abs()));
+        assert!(s[0].iter().zip(&s[1]).any(|(l, r)| l.abs() > r.abs()));
+        assert_eq!(s[6], s[7]);
+    }
+}
+
+#[test]
+fn stems_go_through_the_leftover_block() {
+    let mut whole = stem_engine(true);
+    let mut buf = vec![0i16; 2 * 228];
+    whole.render(&mut buf, 228);
+    let want = stem_floats(&whole);
+    let mut split = stem_engine(true);
+    let mut got = vec![Vec::new(); 2 * stems::SOURCES];
+    for n in [100, 28, 100] {
+        split.render(&mut buf, n);
+        for (g, s) in got.iter_mut().zip(stem_floats(&split)) {
+            g.extend(s);
+        }
+    }
+    assert_eq!(got, want);
+}
+
+#[test]
+fn a_faulting_call_has_no_stems() {
+    let mut e = stem_engine(true);
+    let mut buf = vec![0i16; 2 * 100];
+    e.render(&mut buf, 100);
+    assert_eq!(e.stems().unwrap().frames(), 100);
+    e.frame.devices.pcf = Box::new(Faulty {
+        log: Rc::default(),
+        calls: 0,
+        from: 0,
+    });
+    e.frame.devices.mixer.live.pcf_id = 1;
+    e.frame.mixer_update();
+    e.render(&mut buf, 100);
+    assert!(e.fault().is_some());
+    assert_eq!(e.stems().unwrap().frames(), 0);
+}
