@@ -41,7 +41,7 @@ fn resize_grip(ui: &mut egui::Ui, current: (u32, u32)) -> Option<(u32, u32)> {
     let rect = egui::Rect::from_min_max(corner - vec2(GRIP, GRIP), corner);
     let grip = ui.interact(
         rect,
-        ui.id().with("openrb-resize-grip"),
+        ui.scope_id().with("openrb-resize-grip"),
         egui::Sense::drag(),
     );
     let alpha = if grip.hovered() || grip.dragged() {
