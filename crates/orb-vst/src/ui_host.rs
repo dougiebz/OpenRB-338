@@ -33,17 +33,27 @@ pub const MIN_W: f64 = W / 2.0;
 /// The side of the resize grip in the window's bottom right corner, in points.
 const GRIP: f32 = 18.0;
 
+/// The window size a drag of the resize grip asks for: the pointer at `pointer`, grabbed
+/// `grab` short of the window's bottom right corner, while the window is `current`. The
+/// window's top left corner stays put, so the pointer plus the grab is the new corner; a
+/// press that does not move asks for no change.
+fn grip_size(pointer: Pos2, grab: egui::Vec2, current: (u32, u32)) -> (u32, u32) {
+    let corner = pointer + grab;
+    keep_aspect(
+        corner.x.round().max(1.0) as u32,
+        corner.y.round().max(1.0) as u32,
+        current,
+    )
+}
+
 /// The resize grip: three diagonal lines in the bottom right corner of `ui`. Dragging it
 /// returns the window size to ask the host for. Some hosts and formats (an Audio Unit) give
 /// a plugin window no resizable frame, so the plugin has to offer the handle itself.
 fn resize_grip(ui: &mut egui::Ui, current: (u32, u32)) -> Option<(u32, u32)> {
     let corner = ui.max_rect().max;
     let rect = egui::Rect::from_min_max(corner - vec2(GRIP, GRIP), corner);
-    let grip = ui.interact(
-        rect,
-        ui.scope_id().with("openrb-resize-grip"),
-        egui::Sense::drag(),
-    );
+    let id = ui.scope_id().with("openrb-resize-grip");
+    let grip = ui.interact(rect, id, egui::Sense::drag());
     let alpha = if grip.hovered() || grip.dragged() {
         230
     } else {
@@ -63,13 +73,16 @@ fn resize_grip(ui: &mut egui::Ui, current: (u32, u32)) -> Option<(u32, u32)> {
     if !grip.dragged() {
         return None;
     }
-    // the window's top left corner stays put, so the pointer is the new bottom right corner
     let p = grip.interact_pointer_pos()?;
-    let wanted = keep_aspect(
-        p.x.round().max(1.0) as u32,
-        p.y.round().max(1.0) as u32,
-        current,
-    );
+    // where in the grip it was grabbed, kept for the drag: a click must not resize
+    let grab = if grip.drag_started() {
+        let grab = corner - p;
+        ui.data_mut(|d| d.insert_temp(id, grab));
+        grab
+    } else {
+        ui.data(|d| d.get_temp(id)).unwrap_or(egui::Vec2::ZERO)
+    };
+    let wanted = grip_size(p, grab, current);
     (wanted != current).then_some(wanted)
 }
 
@@ -232,6 +245,8 @@ struct Host {
     physical: PhySize,
     pixels_per_point: f32,
     pointer: Option<Pos2>,
+    /// How many mouse buttons are held: a drag goes on when the pointer leaves the view.
+    held_buttons: u32,
     images: bool,
     mods: egui::Modifiers,
 }
@@ -313,6 +328,7 @@ impl Host {
             physical,
             pixels_per_point,
             pointer: None,
+            held_buttons: 0,
             images: false,
             mods: egui::Modifiers::default(),
         }
@@ -492,6 +508,9 @@ impl Host {
                     modifiers: self.mods,
                 });
             }
+            // A drag that leaves the view (the resize grip pulled outward) keeps its
+            // pointer: the moves still arrive, and losing it would end the drag.
+            MouseEvent::CursorLeft if self.held_buttons > 0 => {}
             MouseEvent::CursorLeft => {
                 self.pointer = None;
                 self.raw.events.push(egui::Event::PointerGone);
@@ -502,6 +521,11 @@ impl Host {
 
     fn button(&mut self, button: baseview::MouseButton, modifiers: Modifiers, pressed: bool) {
         self.set_modifiers(modifiers);
+        self.held_buttons = if pressed {
+            self.held_buttons + 1
+        } else {
+            self.held_buttons.saturating_sub(1)
+        };
         let Some(pos) = self.pointer else {
             return;
         };
@@ -744,6 +768,14 @@ mod aspect_tests {
         let native = (W as u32, H as u32);
         // nothing moved: the native size stays
         assert_eq!(keep_aspect(native.0, native.1, native), native);
+        // a press on the grip that does not move asks for no change, wherever it lands
+        let corner = pos2(native.0 as f32, native.1 as f32);
+        for grab in [vec2(1.0, 1.0), vec2(9.0, 4.0), vec2(17.0, 17.0)] {
+            assert_eq!(grip_size(corner - grab, grab, native), native);
+        }
+        // pulled outward past the old corner, the window grows
+        let grown = grip_size(corner + vec2(100.0, 80.0), vec2(9.0, 9.0), native);
+        assert!(grown.0 > native.0 && grown.1 > native.1);
         // the right edge alone: the height follows
         assert_eq!(keep_aspect(1248, native.1, native), (1248, 22 + 1020));
         // the bottom edge alone: the width follows
