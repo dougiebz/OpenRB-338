@@ -153,8 +153,8 @@ impl Plugin for OpenRb {
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         let frame = Arc::new(ui_host::FrameSize::new(
-            ui_host::W.round() as u32,
-            ui_host::H.round() as u32,
+            (ui_host::W * ui_host::OPEN_SCALE).round() as u32,
+            (ui_host::H * ui_host::OPEN_SCALE).round() as u32,
         ));
         Some(Box::new(PanelEditor {
             app: self.app.clone(),
@@ -185,7 +185,7 @@ impl Plugin for OpenRb {
         engine.halt();
         engine.locate(0);
         self.clock = Clock::new();
-        self.keys = Keys::default();
+        self.keys.all_off(engine);
     }
 
     fn process(

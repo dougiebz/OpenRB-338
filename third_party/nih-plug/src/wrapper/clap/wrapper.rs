@@ -2711,26 +2711,48 @@ impl<P: ClapPlugin> Wrapper<P> {
         true
     }
 
+    // Host-driven resize, as the VST3 view has it (`wrapper/vst3/view.rs`): the host may give
+    // the view any size from the editor's `min_size()` up, and the editor is told through
+    // `on_host_resize()`. Sizes cross the CLAP boundary in the editor's logical pixels times
+    // the scaling factor (always 1 on macOS).
     unsafe extern "C" fn ext_gui_can_resize(_plugin: *const clap_plugin) -> bool {
-        // TODO: Implement Host->Plugin GUI resizing
-        false
+        true
     }
 
     unsafe extern "C" fn ext_gui_get_resize_hints(
         _plugin: *const clap_plugin,
-        _hints: *mut clap_gui_resize_hints,
+        hints: *mut clap_gui_resize_hints,
     ) -> bool {
-        // TODO: Implement Host->Plugin GUI resizing
-        false
+        check_null_ptr!(false, hints);
+
+        // The editor fits its content into whatever it gets, so no aspect ratio is forced
+        *hints = clap_gui_resize_hints {
+            can_resize_horizontally: true,
+            can_resize_vertically: true,
+            preserve_aspect_ratio: false,
+            aspect_ratio_width: 1,
+            aspect_ratio_height: 1,
+        };
+
+        true
     }
 
     unsafe extern "C" fn ext_gui_adjust_size(
-        _plugin: *const clap_plugin,
-        _width: *mut u32,
-        _height: *mut u32,
+        plugin: *const clap_plugin,
+        width: *mut u32,
+        height: *mut u32,
     ) -> bool {
-        // TODO: Implement Host->Plugin GUI resizing
-        false
+        check_null_ptr!(false, plugin, (*plugin).plugin_data, width, height);
+        let wrapper = &*((*plugin).plugin_data as *const Self);
+
+        let (min_width, min_height) = wrapper.editor.borrow().as_ref().unwrap().lock().min_size();
+        let scaling_factor = wrapper.editor_scaling_factor.load(Ordering::Relaxed);
+        let min_width = (min_width as f32 * scaling_factor).round().max(1.0) as u32;
+        let min_height = (min_height as f32 * scaling_factor).round().max(1.0) as u32;
+        *width = (*width).max(min_width);
+        *height = (*height).max(min_height);
+
+        true
     }
 
     unsafe extern "C" fn ext_gui_set_size(
@@ -2738,20 +2760,27 @@ impl<P: ClapPlugin> Wrapper<P> {
         width: u32,
         height: u32,
     ) -> bool {
-        // TODO: Implement Host->Plugin GUI resizing
-        // TODO: The host will also call this if an asynchronous (on Linux) resize request fails
+        // The host will also call this if an asynchronous (on Linux) resize request fails
         check_null_ptr!(false, plugin, (*plugin).plugin_data);
         let wrapper = &*((*plugin).plugin_data as *const Self);
 
-        let (unscaled_width, unscaled_height) =
-            wrapper.editor.borrow().as_ref().unwrap().lock().size();
         let scaling_factor = wrapper.editor_scaling_factor.load(Ordering::Relaxed);
-        let (editor_width, editor_height) = (
-            (unscaled_width as f32 * scaling_factor).round() as u32,
-            (unscaled_height as f32 * scaling_factor).round() as u32,
-        );
+        let scale = if scaling_factor > 0.0 {
+            scaling_factor
+        } else {
+            1.0
+        };
+        let editor = wrapper.editor.borrow();
+        let editor = editor.as_ref().unwrap().lock();
+        let (min_width, min_height) = editor.min_size();
+        let logical_width = (width as f32 / scale).round().max(1.0) as u32;
+        let logical_height = (height as f32 / scale).round().max(1.0) as u32;
+        if logical_width < min_width || logical_height < min_height {
+            return false;
+        }
+        editor.on_host_resize(logical_width, logical_height);
 
-        width == editor_width && height == editor_height
+        true
     }
 
     unsafe extern "C" fn ext_gui_set_parent(
@@ -3153,14 +3182,28 @@ impl<P: ClapPlugin> Wrapper<P> {
         }
         let length = u64::from_le_bytes(length_bytes);
 
-        let mut read_buffer: Vec<u8> = Vec::with_capacity(length as usize);
-        if !read_stream(&*stream, read_buffer.spare_capacity_mut()) {
-            nih_debug_assert_failure!(
-                "Error or end of stream while reading the state buffer from the stream."
-            );
+        // The length is whatever the stream held, so it is not trusted: a state that is not
+        // ours (a corrupt project, another plugin's preset) gives eight arbitrary bytes, and
+        // reserving that much at once aborts the host. Read in bounded pieces instead; a
+        // stream shorter than its length ends the load.
+        const STATE_CHUNK: usize = 1 << 16;
+        let Ok(length) = usize::try_from(length) else {
             return false;
+        };
+        let mut read_buffer: Vec<u8> = Vec::new();
+        while read_buffer.len() < length {
+            let chunk = (length - read_buffer.len()).min(STATE_CHUNK);
+            if read_buffer.try_reserve(chunk).is_err() {
+                return false;
+            }
+            if !read_stream(&*stream, &mut read_buffer.spare_capacity_mut()[..chunk]) {
+                nih_debug_assert_failure!(
+                    "Error or end of stream while reading the state buffer from the stream."
+                );
+                return false;
+            }
+            read_buffer.set_len(read_buffer.len() + chunk);
         }
-        read_buffer.set_len(length as usize);
 
         match state::deserialize_json(&read_buffer) {
             Some(mut state) => {

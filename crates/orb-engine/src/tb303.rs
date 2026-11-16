@@ -537,6 +537,13 @@ impl Tb303 {
     /// (note byte 0). Octaves go in the up and down bytes [`Tb303::note_on`] already
     /// multiplies by 12. The semitone is clamped so `pitch >> 4` stays inside the
     /// pitch table at the current tune.
+    ///
+    /// `slide` says a note is still held: this one glides from it and does not
+    /// retrigger the envelope, as a pattern step does after a step with the slide
+    /// flag. That flag is the note's own in a pattern (it holds the gate open into
+    /// the next step and makes [`Tb303::note_off`] return early), but a live note
+    /// cannot know that another will overlap it, so here the flag is set for the
+    /// note-on only and is clear afterwards: the note's own note-off closes the gate.
     pub fn live_note(&mut self, midi: u8, velocity: u8, slide: bool) {
         let tune = TUNE_TABLE[(self.live[TUNE] >> 2) as usize] as i32;
         // index = 3072 + (tune + semis) * 64, and the table has 6144 entries.
@@ -556,9 +563,10 @@ impl Tb303 {
             let down = ((-semis) + 11) / 12;
             (semis + down * 12, 0, down)
         };
+        self.slide = slide;
         self.note_on([
             note as u8,
-            u8::from(slide),
+            0,
             u8::from(velocity >= 100),
             up as u8,
             down as u8,
