@@ -267,7 +267,7 @@ impl Editor for PanelEditor {
     }
 
     fn constrain_size(&self, width: u32, height: u32) -> (u32, u32) {
-        ui_host::keep_aspect(width, height, self.frame.get())
+        self.frame.constrain(width, height)
     }
 
     fn set_scale_factor(&self, _factor: f32) -> bool {

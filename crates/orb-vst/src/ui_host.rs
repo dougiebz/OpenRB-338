@@ -33,17 +33,41 @@ pub const MIN_W: f64 = W / 2.0;
 /// The side of the resize grip in the window's bottom right corner, in points.
 const GRIP: f32 = 18.0;
 
-/// The window size a drag of the resize grip asks for: the pointer at `pointer`, grabbed
-/// `grab` short of the window's bottom right corner, while the window is `current`. The
-/// window's top left corner stays put, so the pointer plus the grab is the new corner; a
-/// press that does not move asks for no change.
-fn grip_size(pointer: Pos2, grab: egui::Vec2, current: (u32, u32)) -> (u32, u32) {
-    let corner = pointer + grab;
-    keep_aspect(
-        corner.x.round().max(1.0) as u32,
-        corner.y.round().max(1.0) as u32,
-        current,
-    )
+/// A drag of the resize grip: the window's size and the pointer where it began.
+#[derive(Clone, Copy)]
+struct Grab {
+    size: (u32, u32),
+    pointer: Pos2,
+    /// `pointer` is in screen coordinates ([`screen_pointer`]), not the view's.
+    screen: bool,
+}
+
+/// The window size a drag of the resize grip asks for: the window was `start` when the grip
+/// was grabbed and the pointer has moved by `delta` since (right and down grow). The panel
+/// keeps its aspect ratio; the axis that asks for the larger window decides, so the size is
+/// one steady function of the pointer and a press that does not move asks for no change.
+fn grip_size(start: (u32, u32), delta: egui::Vec2) -> (u32, u32) {
+    let ratio = PANEL_H as f64 / PANEL_W as f64;
+    let by_width = f64::from(start.0) + f64::from(delta.x);
+    let by_height = (f64::from(start.1) + f64::from(delta.y) - MENU_H as f64) / ratio;
+    let w = by_width.max(by_height).max(MIN_W).round();
+    (w as u32, height_for(w).round() as u32)
+}
+
+/// The pointer in screen coordinates, y growing downward, where the platform gives it. The
+/// view's own coordinates move with the view while it is resized (on macOS its origin is the
+/// bottom left corner), which made a grip drag chase itself; the screen's do not.
+fn screen_pointer() -> Option<Pos2> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc::{class, msg_send, sel, sel_impl};
+        let p: cocoa::foundation::NSPoint = unsafe { msg_send![class!(NSEvent), mouseLocation] };
+        Some(pos2(p.x as f32, -p.y as f32))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
 }
 
 /// The resize grip: three diagonal lines in the bottom right corner of `ui`. Dragging it
@@ -73,16 +97,24 @@ fn resize_grip(ui: &mut egui::Ui, current: (u32, u32)) -> Option<(u32, u32)> {
     if !grip.dragged() {
         return None;
     }
-    let p = grip.interact_pointer_pos()?;
-    // where in the grip it was grabbed, kept for the drag: a click must not resize
+    let screen = screen_pointer();
+    let now = match screen {
+        Some(p) => p,
+        None => grip.interact_pointer_pos()?,
+    };
     let grab = if grip.drag_started() {
-        let grab = corner - p;
+        let grab = Grab {
+            size: current,
+            pointer: now,
+            screen: screen.is_some(),
+        };
         ui.data_mut(|d| d.insert_temp(id, grab));
         grab
     } else {
-        ui.data(|d| d.get_temp(id)).unwrap_or(egui::Vec2::ZERO)
+        ui.data(|d| d.get_temp::<Grab>(id))
+            .filter(|g| g.screen == screen.is_some())?
     };
-    let wanted = grip_size(p, grab, current);
+    let wanted = grip_size(grab.size, now - grab.pointer);
     (wanted != current).then_some(wanted)
 }
 
@@ -95,11 +127,23 @@ pub fn height_for(width: f64) -> f64 {
 /// The window size that shows the whole panel with no empty band, nearest to the
 /// `width` x `height` a host proposes while the window is `current`. The side the host
 /// moved more decides, so dragging an edge works as well as dragging a corner.
+#[cfg(test)]
 pub fn keep_aspect(width: u32, height: u32, current: (u32, u32)) -> (u32, u32) {
+    aspect_by(width_moved_more(width, height, current), width, height)
+}
+
+/// Whether, of a proposed `width` x `height`, the width moved more from `current`.
+fn width_moved_more(width: u32, height: u32, current: (u32, u32)) -> bool {
     let ratio = PANEL_H as f64 / PANEL_W as f64;
     let moved_w = (f64::from(width) - f64::from(current.0)).abs() * ratio;
     let moved_h = (f64::from(height) - f64::from(current.1)).abs();
-    let w = if moved_w >= moved_h {
+    moved_w >= moved_h
+}
+
+/// The panel-shaped window size the proposed width (`by_width`) or else height gives.
+fn aspect_by(by_width: bool, width: u32, height: u32) -> (u32, u32) {
+    let ratio = PANEL_H as f64 / PANEL_W as f64;
+    let w = if by_width {
         f64::from(width)
     } else {
         (f64::from(height) - MENU_H as f64) / ratio
@@ -108,12 +152,18 @@ pub fn keep_aspect(width: u32, height: u32, current: (u32, u32)) -> (u32, u32) {
     (w as u32, height_for(w).round() as u32)
 }
 
+/// How long after a host's size proposal the next one counts as the same drag.
+const DRAG_GAP: std::time::Duration = std::time::Duration::from_millis(400);
+
 /// The view size the host last asked for, in logical pixels.
 pub struct FrameSize {
     width: AtomicU32,
     height: AtomicU32,
     /// The child `NSView`, once the window exists. Zero before that.
     view: AtomicUsize,
+    /// The side that decides the host's current drag (true: the width) and when the host
+    /// last proposed a size ([`FrameSize::constrain`]).
+    drag: Mutex<Option<(bool, Instant)>>,
 }
 
 impl FrameSize {
@@ -122,7 +172,32 @@ impl FrameSize {
             width: AtomicU32::new(width),
             height: AtomicU32::new(height),
             view: AtomicUsize::new(0),
+            drag: Mutex::new(None),
         }
+    }
+
+    /// [`keep_aspect`] for a host's stream of proposals during one drag: the side that moved
+    /// more at the drag's start decides until the proposals pause. Choosing anew at every
+    /// proposal flips between the sides whenever the pointer is off the panel's diagonal,
+    /// and the window buzzes between two sizes.
+    pub fn constrain(&self, width: u32, height: u32) -> (u32, u32) {
+        self.constrain_at(width, height, Instant::now())
+    }
+
+    fn constrain_at(&self, width: u32, height: u32, now: Instant) -> (u32, u32) {
+        // A size that already has the panel's shape (one the grip asked for) is kept as it
+        // is: deriving it again from its height can land a pixel away, and the two sizes
+        // would chase each other.
+        if f64::from(width) >= MIN_W && height == height_for(f64::from(width)).round() as u32 {
+            return (width, height);
+        }
+        let mut drag = self.drag.lock().unwrap_or_else(|e| e.into_inner());
+        let by_width = match *drag {
+            Some((by_width, last)) if now.saturating_duration_since(last) < DRAG_GAP => by_width,
+            _ => width_moved_more(width, height, self.get()),
+        };
+        *drag = Some((by_width, now));
+        aspect_by(by_width, width, height)
     }
 
     pub fn get(&self) -> (u32, u32) {
@@ -768,14 +843,32 @@ mod aspect_tests {
         let native = (W as u32, H as u32);
         // nothing moved: the native size stays
         assert_eq!(keep_aspect(native.0, native.1, native), native);
-        // a press on the grip that does not move asks for no change, wherever it lands
-        let corner = pos2(native.0 as f32, native.1 as f32);
-        for grab in [vec2(1.0, 1.0), vec2(9.0, 4.0), vec2(17.0, 17.0)] {
-            assert_eq!(grip_size(corner - grab, grab, native), native);
-        }
-        // pulled outward past the old corner, the window grows
-        let grown = grip_size(corner + vec2(100.0, 80.0), vec2(9.0, 9.0), native);
+        // a press on the grip that does not move asks for no change
+        assert_eq!(grip_size(native, vec2(0.0, 0.0)), native);
+        // pulled outward the window grows, inward it shrinks, never below the minimum
+        let grown = grip_size(native, vec2(100.0, 80.0));
         assert!(grown.0 > native.0 && grown.1 > native.1);
+        assert_eq!(grown.1, height_for(f64::from(grown.0)).round() as u32);
+        let shrunk = grip_size(native, vec2(-100.0, -80.0));
+        assert!(shrunk.0 < native.0 && shrunk.1 < native.1);
+        assert_eq!(grip_size(native, vec2(-5000.0, -5000.0)).0, MIN_W as u32);
+        // one drag of a host's corner keeps the side it started with: a pointer off the
+        // diagonal does not flip the window between two sizes
+        let frame = FrameSize::new(native.0, native.1);
+        let t = Instant::now();
+        let first = frame.constrain_at(700, 540, t);
+        assert_eq!(first.0, 700);
+        frame.set(first.0, first.1);
+        let step = std::time::Duration::from_millis(16);
+        assert_eq!(frame.constrain_at(701, 900, t + step).0, 701);
+        // a panel-shaped size is kept whichever side decides the drag
+        for w in 312..1400u32 {
+            let shaped = (w, height_for(f64::from(w)).round() as u32);
+            assert_eq!(frame.constrain_at(shaped.0, shaped.1, t + step), shaped);
+        }
+        // after a pause the next drag chooses anew: here the height moved more
+        let later = t + step + DRAG_GAP;
+        assert_eq!(frame.constrain_at(700, 900, later).1, 900);
         // the right edge alone: the height follows
         assert_eq!(keep_aspect(1248, native.1, native), (1248, 22 + 1020));
         // the bottom edge alone: the width follows
