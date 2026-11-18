@@ -245,6 +245,10 @@ pub struct PlugParams {
     pub pcf: PcfParams,
     #[nested(group = "Compressor", id_prefix = "comp")]
     pub comp: CompParams,
+    /// The original's Remote MIDI Control (the Standard Mapping) on MIDI channel 16. Off by
+    /// default. Not a lane: it is read by the audio thread and never written to the engine.
+    #[id = "remote"]
+    pub remote: BoolParam,
 }
 
 #[derive(Params)]
@@ -532,6 +536,7 @@ impl Default for PlugParams {
             dist: DistParams::default(),
             pcf: PcfParams::default(),
             comp: CompParams::default(),
+            remote: BoolParam::new("Remote MIDI (channel 16)", false),
         }
     }
 }
@@ -1486,6 +1491,8 @@ mod tests {
         let map = params.param_map();
         let lane_ids: HashSet<&str> = LANES.iter().map(|lane| lane.vst_id).collect();
         let map_ids: HashSet<&str> = map.iter().map(|(id, _, _)| id.as_str()).collect();
+        let mut lane_ids = lane_ids;
+        lane_ids.insert("remote"); // the Remote MIDI switch is read, not written to the engine
         assert_eq!(lane_ids, map_ids);
         let group = |id: &str| {
             map.iter()

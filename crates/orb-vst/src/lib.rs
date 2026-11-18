@@ -10,6 +10,7 @@ mod midi;
 mod out;
 mod params;
 mod pull;
+mod remote;
 mod song;
 mod ui_host;
 
@@ -27,6 +28,7 @@ use clock::{Clock, Host};
 use midi::{Event, Keys, byte_from_unit};
 use out::Out;
 use pull::CHANS;
+use remote::Remote;
 
 pub struct OpenRb {
     params: Arc<params::PlugParams>,
@@ -39,6 +41,7 @@ pub struct OpenRb {
     audio: Audio,
     clock: Clock,
     keys: Keys,
+    remote: Remote,
     out: Out,
     scratch: Vec<[f32; CHANS]>,
 }
@@ -65,6 +68,7 @@ impl Default for OpenRb {
             audio,
             clock: Clock::new(),
             keys: Keys::default(),
+            remote: Remote::default(),
             out: Out::new(44_100.0, 512),
             scratch: vec![[0.0; CHANS]; 512],
         }
@@ -206,8 +210,15 @@ impl Plugin for OpenRb {
             self.clock.apply(engine, host, true);
             // Automation first, then MIDI, so a CC in this buffer wins over it.
             self.params.apply(engine, &mut self.sent, &self.gestures);
+            let remote_on = self.params.remote.value();
             while let Some(event) = context.next_event() {
-                if let Some(ev) = midi_event(event) {
+                // With Remote MIDI on, its channel belongs to the Standard Mapping.
+                if remote_on
+                    && remote::channel(&event) == Some(remote::CHANNEL)
+                    && let Some(m) = remote::message(event)
+                {
+                    self.remote.apply(engine, m);
+                } else if let Some(ev) = midi_event(event) {
                     self.keys.apply(engine, ev);
                 }
             }
